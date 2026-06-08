@@ -1,0 +1,80 @@
+name: Commit Metadata Check
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check-commit-metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout PR history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Validate commit authors and committers
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          policy_path=".github/workflows/commit-metadata-check.yml"
+          allowed_name="mitsuksw"
+          allowed_email_regex='^(mitsuksw@gmail\.com|mitsuksw@users\.noreply\.github\.com)$'
+          prohibited='claude|codex|opencode|copilot|cursor|windsurf|aider|goose|continue|devin|ai-agent|llm-agent|agent'
+          range="$BASE..$HEAD"
+
+          # Do not retroactively apply the policy to commits that predate
+          # this workflow. Every later PR checks its complete commit range.
+          if ! git cat-file -e "$BASE:$policy_path" 2>/dev/null; then
+            first_policy_commit="$(
+              git rev-list --reverse "$BASE..$HEAD" -- "$policy_path" | head -n 1
+            )"
+            if [ -z "$first_policy_commit" ]; then
+              echo "::error::Unable to locate the policy-introduction commit."
+              exit 1
+            fi
+            range="${first_policy_commit}^..$HEAD"
+          fi
+
+          bad=0
+
+          while IFS= read -r commit; do
+            [ -n "$commit" ] || continue
+
+            author_name="$(git show -s --format='%an' "$commit")"
+            author_email="$(git show -s --format='%ae' "$commit")"
+            committer_name="$(git show -s --format='%cn' "$commit")"
+            committer_email="$(git show -s --format='%ce' "$commit")"
+
+            echo "Checking $commit"
+            echo "Author: $author_name <$author_email>"
+            echo "Committer: $committer_name <$committer_email>"
+
+            if [ "$author_name" != "$allowed_name" ] ||
+              [ "$committer_name" != "$allowed_name" ]; then
+              echo "::error::Commit $commit does not use the approved name."
+              bad=1
+            fi
+
+            if ! [[ "$author_email" =~ $allowed_email_regex ]] ||
+              ! [[ "$committer_email" =~ $allowed_email_regex ]]; then
+              echo "::error::Commit $commit does not use an approved email."
+              bad=1
+            fi
+
+            if echo "$author_name $author_email $committer_name $committer_email" |
+              grep -Eiq "$prohibited"; then
+              echo "::error::Prohibited tooling marker in commit metadata on $commit."
+              bad=1
+            fi
+          done < <(git rev-list "$range")
+
+          exit "$bad"
